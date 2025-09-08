@@ -111,10 +111,14 @@ async def send_notification(
         
     except TelegramBadRequest as e:
         logger.error(f"Bad request when sending to chat_id {chat_id}: {e}")
+        logger.error(f"Message content: {message}")
+        logger.error(f"Parse mode: {parse_mode}")
         return {
             "success": False,
             "error": "Invalid chat_id or message format",
-            "details": str(e)
+            "details": str(e),
+            "message_content": message,
+            "parse_mode": parse_mode
         }
         
     except TelegramForbiddenError as e:
@@ -153,6 +157,8 @@ async def webhook_notify(request: NotificationRequest):
     """Send a notification to a specific Telegram user"""
     try:
         logger.info(f"Received notification request for chat_id: {request.chat_id}")
+        logger.info(f"Message content: {request.message}")
+        logger.info(f"Parse mode: {request.parse_mode}")
         
         result = await send_notification(
             chat_id=request.chat_id,
@@ -169,6 +175,7 @@ async def webhook_notify(request: NotificationRequest):
             }
         else:
             logger.error(f"Failed to send notification to chat_id: {request.chat_id}")
+            logger.error(f"Error details: {result}")
             raise HTTPException(status_code=400, detail=result)
             
     except Exception as e:
