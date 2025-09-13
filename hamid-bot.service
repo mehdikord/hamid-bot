@@ -1,0 +1,28 @@
+[Unit]
+Description=Hamid Telegram Bot Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/hamid-bot-main
+Environment=PATH=/root/hamid-bot-main/venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/root/hamid-bot-main/venv/bin/python /root/hamid-bot-main/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hamid-bot
+
+# Security settings (relaxed for root user)
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=/root/hamid-bot-main
+
+[Install]
+WantedBy=multi-user.target
+
