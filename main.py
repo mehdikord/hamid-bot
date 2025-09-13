@@ -6,10 +6,13 @@ from typing import Optional, List, Dict, Any
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from aiogram import F
 from datetime import datetime
 import logging
 import httpx
 import json
+import signal
+import sys
 
 import config
 from handlers import seller_main, reports, auth, common
@@ -24,8 +27,8 @@ bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher(storage=storage)
 
 # Include handler routers for essential functionality
-dp.include_router(auth.router)  # Authentication router (highest priority)
-dp.include_router(common.router)  # Common commands like /start
+dp.include_router(common.router)  # Common commands like /start (highest priority)
+dp.include_router(auth.router)  # Authentication router
 dp.include_router(seller_main.router)  # Main seller dashboard
 dp.include_router(reports.router)  # Basic reports
 
@@ -679,8 +682,9 @@ async def get_group_topics(group_id: int):
         logger.error(f"Error fetching group topics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+
 # Auto-registration handler for when bot is added to groups
-@dp.message()
+@dp.message(F.new_chat_members)
 async def handle_new_chat_members(message: Message):
     """Handle when bot is added to a group/channel"""
     try:
@@ -765,11 +769,23 @@ async def main():
     print("Webhook API will handle external notifications")
     print("Press Ctrl+C to stop both services")
     
-    # Run both services concurrently
-    await asyncio.gather(
-        run_bot(),
-        run_webhook()
-    )
+    try:
+        # Run both services concurrently
+        await asyncio.gather(
+            run_bot(),
+            run_webhook()
+        )
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down...")
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
+    finally:
+        # Close bot session
+        try:
+            await bot.session.close()
+        except:
+            pass
+        logger.info("Shutdown complete")
 
 if __name__ == "__main__":
     asyncio.run(main())

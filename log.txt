@@ -1,0 +1,12 @@
+2025-09-13 11:13:54,919 - aiogram.event - INFO - Update id=125596838 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:14:03,957 - aiogram.event - INFO - Update id=125596839 is handled. Duration 1 ms by bot id=8349001836
+2025-09-13 11:14:04,885 - aiogram.event - INFO - Update id=125596840 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:14:46,641 - aiogram.event - INFO - Update id=125596841 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:14:47,612 - aiogram.event - INFO - Update id=125596842 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:28:27,808 - aiogram.event - INFO - Update id=125596843 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:31:38,060 - aiogram.event - INFO - Update id=125596844 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:32:19,401 - aiogram.event - INFO - Update id=125596845 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:32:21,494 - aiogram.event - INFO - Update id=125596846 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:32:25,427 - aiogram.event - INFO - Update id=125596847 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:32:31,537 - aiogram.event - INFO - Update id=125596848 is handled. Duration 0 ms by bot id=8349001836
+2025-09-13 11:34:22,869 - aiogram.event - INFO - Update id=125596849 is handled. Duration 0 ms by bot id=8349001836
