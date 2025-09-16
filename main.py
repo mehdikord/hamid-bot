@@ -94,6 +94,7 @@ class GroupRegistrationRequest(BaseModel):
     topic_id: Optional[int] = Field(None, description="Specific topic ID for the group (optional)")
     group_name: Optional[str] = Field(None, description="Group name")
     description: Optional[str] = Field(None, description="Group description")
+    topic_names: Optional[Dict[int, str]] = Field(None, description="Mapping of topic IDs to their real names")
     
     class Config:
         json_schema_extra = {
@@ -101,7 +102,12 @@ class GroupRegistrationRequest(BaseModel):
                 "group_id": -1001234567890,
                 "topic_id": 12345,
                 "group_name": "Customer Support",
-                "description": "Main support group for customer inquiries"
+                "description": "Main support group for customer inquiries",
+                "topic_names": {
+                    1: "General",
+                    2: "Customer Support",
+                    3: "Technical Issues"
+                }
             }
         }
 
@@ -113,9 +119,13 @@ class ReceiptRequest(BaseModel):
     image: Optional[str] = Field(None, description="Image URL or base64 encoded image")
     customer_name: str = Field(..., description="Customer full name")
     customer_phone: str = Field(..., description="Customer phone number")
+    customer_province: Optional[str] = Field(None, description="Customer province/state")
+    customer_city: Optional[str] = Field(None, description="Customer city")
+    customer_id: Optional[str] = Field(None, description="Customer ID")
     assignee: str = Field(..., description="Assignee username or name")
     group_id: int = Field(..., description="Telegram group ID")
     topic_id: Optional[int] = Field(None, description="Topic ID for posting the receipt")
+    topic_name: Optional[str] = Field(None, description="Topic name for display in receipt message")
     
     class Config:
         json_schema_extra = {
@@ -124,15 +134,380 @@ class ReceiptRequest(BaseModel):
                 "price_deposit": 500.00,
                 "date": "2024-01-15",
                 "image": "https://example.com/receipt.jpg",
-                "customer_name": "John Doe",
-                "customer_phone": "+1234567890",
-                "assignee": "agent_username",
+                "customer_name": "احمد محمدی",
+                "customer_phone": "+989123456789",
+                "customer_province": "تهران",
+                "customer_city": "تهران",
+                "customer_id": "CUST001",
+                "assignee": "علی فروشنده",
                 "group_id": -1001234567890,
-                "topic_id": 12345
+                "topic_id": 12345,
+                "topic_name": "Sales Department"
             }
         }
 
 # Group and receipt service functions
+async def discover_group_topics_with_telethon(group_id: int) -> List[Dict[str, Any]]:
+    """Discover available topics using Telethon for real topic names"""
+    try:
+        from telethon import TelegramClient
+        from telethon.tl.functions.channels import GetFullChannelRequest
+        from telethon.tl.types import InputChannel, MessageActionTopicCreate
+        from telethon.errors import FloodWaitError, ChatAdminRequiredError
+        
+        logger.info(f"🔍 Starting Telethon topic discovery for group {group_id}")
+        available_topics = []
+        
+        # Initialize Telethon client with user account (not bot)
+        # This requires phone number authentication for full API access
+        client = TelegramClient(
+            'topic_discovery_session',
+            int(config.API_ID),
+            config.API_HASH
+        )
+        
+        # Start with user account (requires phone authentication)
+        # This will prompt for phone number and code on first run
+        # If session file exists, it will use that automatically
+        await client.start()
+        
+        # Check if we're logged in as a user (not bot)
+        me = await client.get_me()
+        if me.bot:
+            logger.error("❌ Telethon is using bot account, but we need user account for full API access")
+            logger.error("❌ Please run 'python3 setup_user_auth.py' to authenticate with your personal account")
+            raise Exception("Bot account cannot access forum topics. Need user account.")
+        
+        logger.info(f"✅ Telethon authenticated as user: {me.first_name} (@{me.username or 'no username'})")
+        logger.info(f"✅ User ID: {me.id}, Is Bot: {me.bot}")
+        
+        try:
+            # Get the channel/group entity
+            entity = await client.get_entity(group_id)
+            
+            # Get full channel info which includes forum topics
+            full_channel = await client(GetFullChannelRequest(entity))
+            logger.info(f"🔍 Full channel info retrieved for group {group_id}")
+            
+            # Try to get topics by iterating through messages and looking for topic creation messages
+            seen_topic_ids = set()  # Track seen topic IDs to avoid duplicates
+            
+            async for message in client.iter_messages(entity, limit=200):
+                # Look for messages that create topics
+                if hasattr(message, 'action') and isinstance(message.action, MessageActionTopicCreate):
+                    topic_id = message.id
+                    topic_name = message.action.title
+                    
+                    # Only add if we haven't seen this topic ID before
+                    if topic_id not in seen_topic_ids:
+                        available_topics.append({
+                            "topic_id": topic_id,
+                            "name": topic_name,
+                            "status": "active",
+                            "discovered_at": datetime.now().isoformat(),
+                            "discovery_method": "telethon"
+                        })
+                        seen_topic_ids.add(topic_id)
+                        logger.info(f"✅ Found topic {topic_id} with name: '{topic_name}'")
+                
+                # Also look for messages in topics to discover existing topics
+                elif hasattr(message, 'reply_to') and message.reply_to and hasattr(message.reply_to, 'reply_to_msg_id'):
+                    topic_id = message.reply_to.reply_to_msg_id
+                    
+                    # Only process if we haven't seen this topic ID before
+                    if topic_id not in seen_topic_ids:
+                        # Try to get the topic name from the first message in the topic
+                        topic_name = f"Topic {topic_id}"  # Default name
+                        
+                        # Look for the topic creation message to get the real name
+                        try:
+                            topic_creation_msg = await client.get_messages(entity, ids=topic_id)
+                            if topic_creation_msg and hasattr(topic_creation_msg, 'action') and isinstance(topic_creation_msg.action, MessageActionTopicCreate):
+                                topic_name = topic_creation_msg.action.title
+                                logger.info(f"✅ Found real topic name: '{topic_name}' for topic {topic_id}")
+                        except Exception as e:
+                            logger.info(f"🔍 Could not get topic creation message for {topic_id}: {e}")
+                        
+                        available_topics.append({
+                            "topic_id": topic_id,
+                            "name": topic_name,
+                            "status": "active",
+                            "discovered_at": datetime.now().isoformat(),
+                            "discovery_method": "telethon"
+                        })
+                        seen_topic_ids.add(topic_id)
+                        logger.info(f"✅ Found topic {topic_id} with name: '{topic_name}'")
+            
+            # Always add General topic (topic_id=1) if topics are enabled
+            # But try to get its real name first
+            general_topic_found = any(topic["topic_id"] == 1 for topic in available_topics)
+            if not general_topic_found:
+                # Try to get the real name of the General topic
+                general_topic_name = "General"  # Default name
+                
+                try:
+                    # Try to get the General topic creation message
+                    general_creation_msg = await client.get_messages(entity, ids=1)
+                    if general_creation_msg and hasattr(general_creation_msg, 'action') and isinstance(general_creation_msg.action, MessageActionTopicCreate):
+                        general_topic_name = general_creation_msg.action.title
+                        logger.info(f"✅ Found real General topic name: '{general_topic_name}'")
+                    else:
+                        logger.info(f"🔍 Could not find General topic creation message, using default name")
+                except Exception as e:
+                    logger.info(f"🔍 Could not get General topic name: {e}")
+                
+                available_topics.insert(0, {
+                    "topic_id": 1,
+                    "name": general_topic_name,
+                    "status": "active",
+                    "discovered_at": datetime.now().isoformat(),
+                    "discovery_method": "telethon"
+                })
+                logger.info(f"✅ Added General topic with name: '{general_topic_name}'")
+            
+        except FloodWaitError as e:
+            logger.warning(f"⚠️ FloodWait: {e}")
+            await asyncio.sleep(e.seconds)
+        except ChatAdminRequiredError as e:
+            logger.error(f"❌ Admin required: {e}")
+        except Exception as e:
+            logger.error(f"❌ Error getting channel info: {e}")
+        
+        finally:
+            await client.disconnect()
+        
+        # Final deduplication - remove any remaining duplicates by topic_id
+        unique_topics = []
+        seen_ids = set()
+        for topic in available_topics:
+            if topic["topic_id"] not in seen_ids:
+                unique_topics.append(topic)
+                seen_ids.add(topic["topic_id"])
+        
+        logger.info(f"📋 Telethon topic discovery completed. Found {len(unique_topics)} unique topics")
+        return unique_topics
+        
+    except Exception as e:
+        logger.error(f"❌ Error during Telethon topic discovery for group {group_id}: {e}")
+        # Fallback to Telegram API method
+        logger.info("🔄 Falling back to Telegram API topic discovery...")
+        return await discover_group_topics_with_telegram_api(group_id)
+
+async def discover_group_topics_with_telegram_api(group_id: int) -> List[Dict[str, Any]]:
+    """Discover available topics using direct Telegram Bot API calls"""
+    try:
+        import httpx
+        
+        logger.info(f"🔍 Starting Telegram API topic discovery for group {group_id}")
+        available_topics = []
+        
+        # Test common topic IDs (skip 1 as it's always General)
+        common_topic_ids = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        
+        async with httpx.AsyncClient() as client:
+            for topic_id in common_topic_ids:
+                try:
+                    logger.info(f"🔍 Testing topic {topic_id} with Telegram API...")
+                    
+                    # Send a test message to the topic
+                    send_response = await client.post(
+                        f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage",
+                        json={
+                            "chat_id": group_id,
+                            "text": "🔍",
+                            "message_thread_id": topic_id
+                        }
+                    )
+                    
+                    if send_response.status_code == 200:
+                        message_data = send_response.json()
+                        if message_data.get("ok"):
+                            message_info = message_data.get("result", {})
+                            topic_name = f"Topic {topic_id}"  # Default name
+                            
+                            # Try to extract topic name from the message info
+                            # The message might contain thread information
+                            if "reply_to_message" in message_info:
+                                reply_info = message_info["reply_to_message"]
+                                if "message_thread_info" in reply_info:
+                                    thread_info = reply_info["message_thread_info"]
+                                    if "name" in thread_info:
+                                        topic_name = thread_info["name"]
+                                        logger.info(f"✅ Extracted topic name from API: '{topic_name}'")
+                            
+                            available_topics.append({
+                                "topic_id": topic_id,
+                                "name": topic_name,
+                                "status": "active",
+                                "discovered_at": datetime.now().isoformat(),
+                                "discovery_method": "telegram_api"
+                            })
+                            
+                            # Clean up the test message
+                            message_id = message_info.get("message_id")
+                            if message_id:
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{config.BOT_TOKEN}/deleteMessage",
+                                        json={
+                                            "chat_id": group_id,
+                                            "message_id": message_id
+                                        }
+                                    )
+                                except:
+                                    pass
+                            
+                            logger.info(f"✅ Found topic {topic_id} with name: '{topic_name}'")
+                        else:
+                            logger.info(f"❌ Topic {topic_id} not available: {message_data.get('description', 'Unknown error')}")
+                    else:
+                        logger.info(f"❌ Topic {topic_id} not available: HTTP {send_response.status_code}")
+                        
+                except Exception as e:
+                    logger.info(f"❌ Topic {topic_id} not available: {e}")
+                    # Stop testing if we get consecutive failures
+                    if len(available_topics) == 0 and topic_id > 5:
+                        break
+                    continue
+        
+        # Always add General topic (topic_id=1) if topics are enabled
+        if not any(topic["topic_id"] == 1 for topic in available_topics):
+            available_topics.insert(0, {
+                "topic_id": 1,
+                "name": "General",
+                "status": "active",
+                "discovered_at": datetime.now().isoformat(),
+                "discovery_method": "telegram_api"
+            })
+            logger.info("✅ Added General topic (always exists in groups with topics)")
+        
+        logger.info(f"📋 Telegram API topic discovery completed. Found {len(available_topics)} topics")
+        return available_topics
+        
+    except Exception as e:
+        logger.error(f"❌ Error during Telegram API topic discovery for group {group_id}: {e}")
+        # Fallback to aiogram method
+        logger.info("🔄 Falling back to aiogram topic discovery...")
+        return await discover_group_topics_aiogram(group_id)
+
+async def discover_group_topics_aiogram(group_id: int) -> List[Dict[str, Any]]:
+    """Discover available topics in a group using aiogram 3.x compatible methods"""
+    try:
+        from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+        import httpx
+        
+        logger.info(f"🔍 Starting topic discovery for group {group_id}")
+        available_topics = []
+        
+        # Test common topic IDs (skip 1 as it's always General)
+        common_topic_ids = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        
+        for topic_id in common_topic_ids:
+            try:
+                logger.info(f"🔍 Testing topic {topic_id}...")
+                
+                # Try to send a test message to the topic to see if it exists
+                # This is the most reliable way to test topic existence in aiogram 3.x
+                test_message = await bot.send_message(
+                    chat_id=group_id,
+                    text="🔍",  # Minimal test message
+                    message_thread_id=topic_id
+                )
+                
+                if test_message:
+                    # Message sent successfully, topic exists
+                    topic_name = f"Topic {topic_id}"  # Default name
+                    
+                    # Try to get the real topic name from the first message in the topic
+                    try:
+                        # The message object might contain thread info
+                        if hasattr(test_message, 'message_thread_id') and test_message.message_thread_id:
+                            logger.info(f"✅ Found topic {topic_id} with thread_id: {test_message.message_thread_id}")
+                        
+                        # Try to extract topic name from message thread info
+                        if hasattr(test_message, 'message_thread_info') and test_message.message_thread_info:
+                            thread_info = test_message.message_thread_info
+                            logger.info(f"🔍 Thread info found: {thread_info}")
+                            
+                            # Try different attributes that might contain the topic name
+                            if hasattr(thread_info, 'name') and thread_info.name:
+                                topic_name = thread_info.name
+                                logger.info(f"✅ Extracted topic name from thread_info.name: '{topic_name}'")
+                            elif hasattr(thread_info, 'title') and thread_info.title:
+                                topic_name = thread_info.title
+                                logger.info(f"✅ Extracted topic name from thread_info.title: '{topic_name}'")
+                            else:
+                                logger.info(f"🔍 Thread info available but no name/title found: {dir(thread_info)}")
+                        else:
+                            logger.info(f"🔍 No message_thread_info found in message: {dir(test_message)}")
+                        
+                        # If we still have default name, try to get it from the message itself
+                        if topic_name == f"Topic {topic_id}":
+                            # Try to get the message content or other attributes
+                            logger.info(f"🔍 Message attributes: {[attr for attr in dir(test_message) if not attr.startswith('_')]}")
+                            
+                            # Check if there's any way to get topic name from the message
+                            if hasattr(test_message, 'reply_to_message') and test_message.reply_to_message:
+                                reply_msg = test_message.reply_to_message
+                                logger.info(f"🔍 Reply message found: {reply_msg}")
+                        
+                        logger.info(f"✅ Found topic {topic_id} with name: '{topic_name}'")
+                        
+                    except Exception as e:
+                        logger.info(f"✅ Found topic {topic_id} but couldn't get name: {e}")
+                    
+                    available_topics.append({
+                        "topic_id": topic_id,
+                        "name": topic_name,
+                        "status": "active",
+                        "discovered_at": datetime.now().isoformat()
+                    })
+                    
+                    # Clean up test message
+                    try:
+                        await bot.delete_message(
+                            chat_id=group_id,
+                            message_id=test_message.message_id
+                        )
+                        logger.info(f"✅ Cleaned up test message for topic {topic_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not delete test message for topic {topic_id}: {e}")
+                
+            except TelegramBadRequest as e:
+                logger.info(f"❌ Topic {topic_id} not available: {e}")
+                # Stop testing if we get consecutive failures
+                if len(available_topics) == 0 and topic_id > 5:
+                    break
+            except Exception as e:
+                logger.warning(f"⚠️ Error testing topic {topic_id}: {e}")
+                # Continue with next topic
+                continue
+        
+        # Always add General topic (topic_id=1) if topics are enabled
+        # because General topic always exists in groups with topics
+        if not any(topic["topic_id"] == 1 for topic in available_topics):
+            available_topics.insert(0, {
+                "topic_id": 1,
+                "name": "General",
+                "status": "active",
+                "discovered_at": datetime.now().isoformat()
+            })
+            logger.info("✅ Added General topic (always exists in groups with topics)")
+        
+        logger.info(f"📋 Topic discovery completed. Found {len(available_topics)} topics")
+        return available_topics
+        
+    except Exception as e:
+        logger.error(f"❌ Error during topic discovery for group {group_id}: {e}")
+        # Return at least the General topic if topics are enabled
+        return [{
+            "topic_id": 1,
+            "name": "General",
+            "status": "active",
+            "discovered_at": datetime.now().isoformat(),
+            "error": f"Discovery failed: {str(e)}"
+        }]
+
 async def fetch_group_metadata(group_id: int) -> Dict[str, Any]:
     """Fetch group metadata from Telegram API"""
     try:
@@ -164,6 +539,35 @@ async def fetch_group_metadata(group_id: int) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Could not fetch member count for group {group_id}: {e}")
         
+        # Check if topics are enabled in the group (simple check)
+        has_topics_enabled = False
+        logger.info(f"🔍 Checking topics for group {group_id}, type: {chat.type}")
+        
+        if chat.type in ["group", "supergroup"]:
+            # Simple approach: Check if the chat object has is_forum property
+            if hasattr(chat, 'is_forum') and chat.is_forum:
+                has_topics_enabled = True
+                logger.info(f"✅ Group {group_id} has topics enabled (is_forum=True)")
+            else:
+                # Fallback: assume topics are enabled for supergroups
+                has_topics_enabled = chat.type == "supergroup"
+                logger.info(f"Fallback: assuming topics enabled for {chat.type}: {has_topics_enabled}")
+        else:
+            # Channels don't have topics
+            has_topics_enabled = False
+            logger.info(f"❌ Group {group_id} is a {chat.type}, no topics supported")
+        
+        logger.info(f"🎯 Final result: has_topics_enabled = {has_topics_enabled}")
+        
+        # Topic discovery functionality - get topic names from first messages
+        available_topics = []
+        if has_topics_enabled:
+            logger.info(f"🔍 Discovering available topics for group {group_id}...")
+            # Use Telethon for topic discovery (Telethon has bot restrictions)
+            # For real topic names, users can manually configure them in the backend
+            available_topics = await discover_group_topics_with_telethon(group_id)
+            logger.info(f"📋 Discovered {len(available_topics)} topics: {[t['topic_id'] for t in available_topics]}")
+        
         metadata = {
             "group_id": chat.id,
             "title": chat.title,
@@ -186,6 +590,8 @@ async def fetch_group_metadata(group_id: int) -> Dict[str, Any]:
                 "can_pin_messages": False,
                 "can_manage_topics": False
             },
+            "has_topics_enabled": has_topics_enabled,  # Simple topic detection
+            "available_topics": available_topics,  # Discovered topics with names
             "fetched_at": datetime.now().isoformat()
         }
         
@@ -204,6 +610,26 @@ async def fetch_group_metadata(group_id: int) -> Dict[str, Any]:
         logger.error(f"Unexpected error when fetching group {group_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+async def check_topic_exists(group_id: int, topic_id: int) -> bool:
+    """Check if a topic exists in a group by trying to send a test message"""
+    try:
+        # Try to send a very short test message to the topic
+        test_message = await bot.send_message(
+            chat_id=group_id,
+            message_thread_id=topic_id,
+            text=".",
+            parse_mode="HTML"
+        )
+        # If successful, delete the test message
+        try:
+            await bot.delete_message(chat_id=group_id, message_id=test_message.message_id)
+        except:
+            pass  # Ignore if deletion fails
+        return True
+    except Exception as e:
+        logger.info(f"Topic {topic_id} does not exist or is not accessible: {e}")
+        return False
+
 async def send_receipt_to_group(
     group_id: int,
     topic_id: Optional[int],
@@ -216,20 +642,36 @@ async def send_receipt_to_group(
         # Format the receipt message
         remaining_amount = receipt_data.price_deal - receipt_data.price_deposit
         
-        message = f"""
-🧾 <b>اطلاعات رسید</b>
+        # Create hashtag for assignee (replace spaces with underscores and add #)
+        assignee_hashtag = f"#{receipt_data.assignee.replace(' ', '_')}"
+        
+        # Create simple Telegram ID with @
+        telegram_id_mention = ""
+        if receipt_data.customer_id:
+            telegram_id_mention = f'🔗 <b>آیدی:</b> @{receipt_data.customer_id}'
+        
+        message = f"""💠💎💠💎💠💎💠💎
 
-👤 <b>مشتری:</b> {receipt_data.customer_name}
-📞 <b>تلفن:</b> {receipt_data.customer_phone}
-👨‍💼 <b>مسئول:</b> {receipt_data.assignee}
+👤 <b>نام:</b> {receipt_data.customer_name}
+📞 <b>شماره:</b> {receipt_data.customer_phone}
+{'🗺 <b>استان:</b> ' + receipt_data.customer_province if receipt_data.customer_province else ''}
+{'🏡 <b>شهر:</b> ' + receipt_data.customer_city if receipt_data.customer_city else ''}
+{telegram_id_mention}
 📅 <b>تاریخ:</b> {receipt_data.date}
 
-💰 <b>قیمت کل:</b> ${receipt_data.price_deal:,.2f}
-💳 <b>پیش پرداخت:</b> ${receipt_data.price_deposit:,.2f}
-📊 <b>باقی مانده:</b> ${remaining_amount:,.2f}
+💰 — — — — — — — 💰
+
+💲 <b>مبلغ کل:</b> {receipt_data.price_deal:,.0f} تومان
+💵 <b>مبلغ واریزی:</b> {receipt_data.price_deposit:,.0f} تومان
+
+💰 — — — — — — — 💰
+
+👨‍💼 <b>کارشناس:</b> {assignee_hashtag}
+
+💠💎💠💎💠💎💠💎
 
 {'📷 <b>تصویر رسید:</b> ضمیمه شده' if receipt_data.image else ''}
-        """.strip()
+{'🏷️ <b>موضوع:</b> ' + receipt_data.topic_name if receipt_data.topic_name else ''}"""
         
         # Send message to group/topic
         # Only use message_thread_id for groups/supergroups, not channels
@@ -240,20 +682,29 @@ async def send_receipt_to_group(
         
         # Only add message_thread_id if it's provided (for groups with topics)
         if topic_id is not None:
-            send_params["message_thread_id"] = topic_id
+            # Check if topic exists before trying to send
+            topic_exists = await check_topic_exists(group_id, topic_id)
+            if topic_exists:
+                send_params["message_thread_id"] = topic_id
+                logger.info(f"Topic {topic_id} exists, sending to topic")
+            else:
+                logger.warning(f"Topic {topic_id} does not exist, sending to main group instead")
+                topic_id = None  # Remove topic_id to send to main group
         
         # If there's an image, send as photo with caption, otherwise send as text message
         if receipt_data.image and receipt_data.image.startswith('http'):
             try:
                 # Send image with receipt text as caption
-                send_params["photo"] = receipt_data.image
-                send_params["caption"] = message
-                sent_message = await bot.send_photo(**send_params)
+                photo_params = send_params.copy()
+                photo_params["photo"] = receipt_data.image
+                photo_params["caption"] = message
+                sent_message = await bot.send_photo(**photo_params)
             except Exception as e:
                 logger.error(f"Could not send image, falling back to text: {e}")
-                # Fallback to text message if image fails
-                send_params["text"] = message
-                sent_message = await bot.send_message(**send_params)
+                # Fallback to text message if image fails - remove photo param
+                text_params = send_params.copy()
+                text_params["text"] = message
+                sent_message = await bot.send_message(**text_params)
         else:
             # Send as text message
             send_params["text"] = message
@@ -271,6 +722,31 @@ async def send_receipt_to_group(
         
     except TelegramBadRequest as e:
         logger.error(f"Bad request when sending receipt to group {group_id}: {e}")
+        
+        # If it's a "message thread not found" error and we have a topic_id, try without topic
+        if "message thread not found" in str(e).lower() and topic_id is not None:
+            logger.info(f"Topic {topic_id} not found, attempting to send to main group without topic")
+            try:
+                # Remove topic_id and try again
+                fallback_params = {
+                    "chat_id": group_id,
+                    "parse_mode": "HTML",
+                    "text": message
+                }
+                sent_message = await bot.send_message(**fallback_params)
+                
+                logger.info(f"Successfully sent receipt to main group {group_id} (topic fallback)")
+                return {
+                    "success": True,
+                    "message_id": sent_message.message_id,
+                    "group_id": group_id,
+                    "topic_id": None,  # Sent to main group
+                    "message": "Receipt sent to main group (topic not found)",
+                    "fallback": True
+                }
+            except Exception as fallback_error:
+                logger.error(f"Fallback to main group also failed: {fallback_error}")
+        
         return {
             "success": False,
             "error": "Invalid group ID or message format",
@@ -292,6 +768,37 @@ async def send_receipt_to_group(
             "error": "Internal server error",
             "details": str(e)
         }
+
+async def check_and_promote_bot_permissions(group_id: int) -> bool:
+    """Check if bot has admin rights and try to promote if possible"""
+    try:
+        from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+        
+        # Get bot's current status in the group
+        try:
+            bot_member = await bot.get_chat_member(group_id, bot.id)
+            logger.info(f"Bot status in group {group_id}: {bot_member.status}")
+            
+            # Check if bot is already admin
+            if bot_member.status in ['administrator', 'creator']:
+                logger.info(f"Bot already has admin rights in group {group_id}")
+                return True
+            
+            # If bot is not admin, we can't promote it ourselves
+            # Only group admins can promote the bot
+            logger.warning(f"Bot is not admin in group {group_id}, status: {bot_member.status}")
+            return False
+            
+        except TelegramBadRequest as e:
+            logger.error(f"Bad request when checking bot status in group {group_id}: {e}")
+            return False
+        except TelegramForbiddenError as e:
+            logger.error(f"Forbidden when checking bot status in group {group_id}: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error checking bot permissions in group {group_id}: {e}")
+        return False
 
 async def auto_register_group_to_backend(group_metadata: Dict[str, Any]) -> bool:
     """Automatically send complete group metadata to backend when bot is added to group"""
@@ -537,6 +1044,19 @@ async def register_group(request: GroupRegistrationRequest):
         # Fetch group metadata from Telegram
         group_metadata = await fetch_group_metadata(request.group_id)
         
+        # Apply custom topic names if provided
+        available_topics = group_metadata.get("available_topics", [])
+        if request.topic_names:
+            logger.info(f"🔧 Applying custom topic names: {request.topic_names}")
+            for topic in available_topics:
+                topic_id = topic["topic_id"]
+                if topic_id in request.topic_names:
+                    old_name = topic["name"]
+                    new_name = request.topic_names[topic_id]
+                    topic["name"] = new_name
+                    topic["custom_name"] = True
+                    logger.info(f"✅ Updated topic {topic_id}: '{old_name}' → '{new_name}'")
+        
         # Add additional information from request
         group_metadata.update({
             "topic_id": request.topic_id,
@@ -544,9 +1064,11 @@ async def register_group(request: GroupRegistrationRequest):
             "custom_description": request.description,
             "registered_at": datetime.now().isoformat(),
             "topic_info": {
-                "has_topics": group_metadata.get("type") in ["supergroup"],
-                "supports_topics": group_metadata.get("type") in ["supergroup"],
+                "has_topics": group_metadata.get("has_topics_enabled", False),
+                "supports_topics": group_metadata.get("has_topics_enabled", False),
                 "topic_id_provided": request.topic_id is not None,
+                "topic_count": len(available_topics),
+                "custom_topic_names": request.topic_names is not None,
                 "recommended_usage": "Use topic_id for supergroups, ignore for channels and simple groups"
             }
         })
@@ -586,6 +1108,59 @@ async def get_group_metadata(group_id: int):
         raise
     except Exception as e:
         logger.error(f"Error fetching group metadata: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/api/groups/{group_id}/basic")
+async def get_group_basic_info(group_id: int):
+    """Get basic group info without topic discovery (lightweight)"""
+    try:
+        logger.info(f"Fetching basic info for group_id: {group_id}")
+        
+        from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+        
+        # Get basic chat information only
+        chat = await bot.get_chat(group_id)
+        
+        # Get member count
+        member_count = 0
+        try:
+            member_count = await bot.get_chat_member_count(group_id)
+        except Exception as e:
+            logger.warning(f"Could not fetch member count for group {group_id}: {e}")
+        
+        # Simple topic check without discovery
+        has_topics_enabled = False
+        if chat.type in ["group", "supergroup"]:
+            if hasattr(chat, 'is_forum') and chat.is_forum:
+                has_topics_enabled = True
+        
+        basic_info = {
+            "group_id": chat.id,
+            "title": chat.title,
+            "type": chat.type,
+            "description": getattr(chat, 'description', None),
+            "username": getattr(chat, 'username', None),
+            "member_count": member_count,
+            "has_topics_enabled": has_topics_enabled,
+            "fetched_at": datetime.now().isoformat()
+        }
+        
+        return {
+            "success": True,
+            "message": "Basic group info retrieved successfully",
+            "group_info": basic_info
+        }
+        
+    except TelegramBadRequest as e:
+        logger.error(f"Bad request when fetching group {group_id}: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid group ID or bot not in group: {str(e)}")
+        
+    except TelegramForbiddenError as e:
+        logger.error(f"Forbidden when fetching group {group_id}: {e}")
+        raise HTTPException(status_code=403, detail=f"Bot doesn't have permission to access group: {str(e)}")
+        
+    except Exception as e:
+        logger.error(f"Error fetching basic group info: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # Receipt Management Endpoints
@@ -638,13 +1213,18 @@ async def create_receipt(request: ReceiptRequest):
                 "receipt_data": {
                     "customer_name": request.customer_name,
                     "customer_phone": request.customer_phone,
+                    "customer_province": request.customer_province,
+                    "customer_city": request.customer_city,
+                    "customer_id": request.customer_id,
                     "price_deal": request.price_deal,
                     "price_deposit": request.price_deposit,
                     "remaining_amount": request.price_deal - request.price_deposit,
                     "date": request.date,
                     "assignee": request.assignee,
+                    "assignee_hashtag": f"#{request.assignee.replace(' ', '_')}",
                     "group_id": request.group_id,
                     "topic_id": request.topic_id,
+                    "topic_name": request.topic_name,
                     "message_id": result["message_id"],
                     "created_at": datetime.now().isoformat()
                 },
@@ -661,23 +1241,81 @@ async def create_receipt(request: ReceiptRequest):
         logger.error(f"Error processing receipt creation request: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+class TopicNamesUpdateRequest(BaseModel):
+    """Request model for updating topic names"""
+    topic_names: Dict[int, str] = Field(..., description="Mapping of topic IDs to their real names")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "topic_names": {
+                    1: "General",
+                    2: "Customer Support", 
+                    3: "Technical Issues"
+                }
+            }
+        }
+
+@app.post("/api/groups/{group_id}/topics/names")
+async def update_topic_names(group_id: int, request: TopicNamesUpdateRequest):
+    """Update topic names for a group"""
+    try:
+        logger.info(f"Updating topic names for group_id: {group_id}")
+        logger.info(f"Topic names: {request.topic_names}")
+        
+        # Fetch current group metadata
+        group_metadata = await fetch_group_metadata(group_id)
+        available_topics = group_metadata.get("available_topics", [])
+        
+        # Apply custom topic names
+        updated_topics = []
+        for topic in available_topics:
+            topic_id = topic["topic_id"]
+            if topic_id in request.topic_names:
+                old_name = topic["name"]
+                new_name = request.topic_names[topic_id]
+                topic["name"] = new_name
+                topic["custom_name"] = True
+                topic["updated_at"] = datetime.now().isoformat()
+                logger.info(f"✅ Updated topic {topic_id}: '{old_name}' → '{new_name}'")
+            updated_topics.append(topic)
+        
+        return {
+            "success": True,
+            "message": "Topic names updated successfully",
+            "group_id": group_id,
+            "updated_topics": updated_topics,
+            "topic_count": len(updated_topics)
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions from fetch_group_metadata
+        raise
+    except Exception as e:
+        logger.error(f"Error updating topic names: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 @app.get("/api/groups/{group_id}/topics")
 async def get_group_topics(group_id: int):
     """Get available topics for a group (if supported)"""
     try:
         logger.info(f"Fetching topics for group_id: {group_id}")
         
-        # Note: Telegram Bot API doesn't provide a direct way to list topics
-        # This is a placeholder endpoint that could be enhanced with custom logic
-        # You might need to maintain a list of topics manually or use other methods
+        # Fetch fresh group metadata which includes topic discovery
+        group_metadata = await fetch_group_metadata(group_id)
         
         return {
             "success": True,
-            "message": "Topics endpoint - implementation depends on your topic management strategy",
+            "message": "Topics retrieved successfully",
             "group_id": group_id,
-            "note": "Telegram Bot API doesn't provide direct topic listing. Consider maintaining topic list manually or using message_thread_id from previous messages."
+            "has_topics_enabled": group_metadata.get("has_topics_enabled", False),
+            "available_topics": group_metadata.get("available_topics", []),
+            "topic_count": len(group_metadata.get("available_topics", []))
         }
         
+    except HTTPException:
+        # Re-raise HTTP exceptions from fetch_group_metadata
+        raise
     except Exception as e:
         logger.error(f"Error fetching group topics: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -695,6 +1333,22 @@ async def handle_new_chat_members(message: Message):
             if bot_was_added and message.chat.type in ['group', 'supergroup', 'channel']:
                 logger.info(f"Bot was added to {message.chat.type}: {message.chat.id}")
                 
+                # Check bot permissions and try to promote to admin
+                bot_has_admin_rights = await check_and_promote_bot_permissions(message.chat.id)
+                
+                if not bot_has_admin_rights:
+                    # Send message asking for permissions
+                    await bot.send_message(
+                        chat_id=message.chat.id,
+                        text="⚠️ <b>لطفا دسترسی‌ها را به ربات بدهید</b>\n\n"
+                             "برای عملکرد صحیح ربات، لطفاً:\n"
+                             "• ربات را به عنوان ادمین اضافه کنید\n"
+                             "• تمام دسترسی‌های لازم را به ربات بدهید",
+                        parse_mode="HTML"
+                    )
+                    logger.warning(f"Bot added to group {message.chat.id} but doesn't have admin rights")
+                    # Don't return here - continue with group registration
+                
                 # Fetch group metadata
                 try:
                     group_metadata = await fetch_group_metadata(message.chat.id)
@@ -706,9 +1360,10 @@ async def handle_new_chat_members(message: Message):
                         "custom_description": getattr(message.chat, 'description', None),
                         "registered_at": datetime.now().isoformat(),
                         "topic_info": {
-                            "has_topics": group_metadata.get("type") in ["supergroup"],
-                            "supports_topics": group_metadata.get("type") in ["supergroup"],
+                            "has_topics": group_metadata.get("has_topics_enabled", False),
+                            "supports_topics": group_metadata.get("has_topics_enabled", False),
                             "topic_id_provided": False,
+                            "topic_count": len(group_metadata.get("available_topics", [])),
                             "recommended_usage": "Use topic_id for supergroups, ignore for channels and simple groups"
                         },
                         "auto_registered_at": datetime.now().isoformat(),
@@ -719,12 +1374,18 @@ async def handle_new_chat_members(message: Message):
                     success = await auto_register_group_to_backend(group_metadata)
                     
                     if success:
-                        # Send confirmation message to group
+                        # Send success message to group
+                        admin_status = "✅ ادمین" if bot_has_admin_rights else "⚠️ عضو عادی"
                         await bot.send_message(
                             chat_id=message.chat.id,
-                            text="🤖 <b>Bot Added Successfully!</b>\n\n✅ Group registered automatically\n✅ Ready to receive receipts\n\nUse the API to send receipts to this group!",
+                            text="✅ <b>ربات با موفقیت اضافه شد!</b>\n\n"
+                                 f"🎉 گروه به صورت خودکار ثبت شد\n"
+                                 f"🤖 ربات آماده دریافت رسیدها است\n"
+                                 f"👤 وضعیت ربات: {admin_status}\n"
+                                 "📋 از API برای ارسال رسید به این گروه استفاده کنید",
                             parse_mode="HTML"
                         )
+                        logger.info(f"Bot successfully added and registered in group {message.chat.id}")
                     else:
                         logger.error(f"Failed to auto-register group {message.chat.id}")
                         
